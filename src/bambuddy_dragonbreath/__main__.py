@@ -54,6 +54,8 @@ async def run(cfg: Config) -> None:
                 logger.exception("Reconcile failed")
             await asyncio.sleep(cfg.reconcile_interval_s)
 
+    for c in controllers:
+        await c.check_heater()
     tasks = [asyncio.create_task(consume_events())] + [asyncio.create_task(reconcile_loop(c)) for c in controllers]
     logger.info("Watching %d printer(s) via %s", len(controllers), cfg.bambuddy.url)
     await stop.wait()

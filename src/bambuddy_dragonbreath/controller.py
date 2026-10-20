@@ -65,6 +65,34 @@ class PrinterController:
         self._off_task: asyncio.Task | None = None
         self._resolver_task: asyncio.Task | None = None
 
+    async def check_heater(self) -> None:
+        """Log what we're talking to at startup, so a wrong URL or a device
+        still running its own AUTO logic shows up before the first print."""
+        try:
+            state = await self.heater.get_state()
+        except Exception as e:
+            self.log.error("DragonBreath at %s unreachable: %s", self.heater.base_url, e)
+            return
+        env = state.get("environment") or {}
+        safety = state.get("safety") or {}
+        self.log.info(
+            "DragonBreath %s firmware %s: mode=%s, control source=%s, chamber=%s°C",
+            state.get("device_id"),
+            state.get("firmware"),
+            state.get("mode"),
+            env.get("control_source"),
+            ((state.get("sensors") or {}).get("chamber") or {}).get("temperature_c"),
+        )
+        if env.get("control_source") not in (None, "none"):
+            self.log.warning(
+                "DragonBreath control source is %r; set it to None so its own AUTO logic can't also drive the heater",
+                env.get("control_source"),
+            )
+        if state.get("mode") == "auto":
+            self.log.warning("DragonBreath AUTO mode is armed; it will act on its own filament detection")
+        if safety.get("fault_latched") or safety.get("inhibited"):
+            self.log.error("DragonBreath has a latched fault/inhibit (%s)", safety.get("reason"))
+
     # ── events ────────────────────────────────────────────────────────────
 
     async def handle_event(self, msg: dict) -> None:

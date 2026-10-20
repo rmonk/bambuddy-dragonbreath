@@ -38,6 +38,7 @@ class FakeBambuddy:
 
 class FakeHeater:
     dry_run = False
+    base_url = "http://db"
 
     def __init__(self):
         self.calls: list[tuple] = []
@@ -285,6 +286,28 @@ async def test_max_engaged_hours():
     now[0] = 3601
     await c.reconcile()
     assert h.commands()[-1] == ("off",)
+
+
+async def test_check_heater_logs_and_warns(caplog):
+    c, b, h = make()
+    s = h.state()
+    s["environment"] = {"control_source": "bambu"}
+    h.get_state = lambda: _value(s)
+    with caplog.at_level("INFO"):
+        await c.check_heater()
+    assert "control source is 'bambu'" in caplog.text
+
+    async def boom():
+        raise ConnectionError("no route")
+
+    h.get_state = boom
+    await c.check_heater()
+    assert "unreachable" in caplog.text
+    assert h.commands() == []
+
+
+async def _value(v):
+    return v
 
 
 async def test_shutdown_turns_off_our_heating():
