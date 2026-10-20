@@ -54,7 +54,10 @@ class Config(BaseModel):
     # Off by default: clearing a safety latch should be a human decision.
     auto_clear_fault: bool = False
     # How often to re-check printer and heater state independently of events.
-    reconcile_interval_s: float = 30
+    reconcile_interval_s: float = 15
+    # Stop heating for a Bambuddy queue preheat that hasn't turned into a
+    # print after this long.
+    preheat_max_minutes: float = 45
     # Turn the heater off if Bambuddy can't be reached for this long.
     bambuddy_lost_off_s: float = 600
     # Hard cap on one continuous heating session, whatever Bambuddy says.
@@ -103,6 +106,7 @@ def _config_from_env() -> dict:
         "reconcile_interval_s",
         "bambuddy_lost_off_s",
         "max_engaged_hours",
+        "preheat_max_minutes",
         "dry_run",
         "log_level",
     ):

@@ -59,6 +59,11 @@ class PrinterController:
         self.target_c = 0
         self.engaged_at: float | None = None
         self.last_bambuddy_ok = clock()
+        # Bambuddy's queue preheat (bed heating before the upload) we're heating for.
+        self.preheat_item: int | None = None
+        self.preheat_started: float | None = None
+        self._preheat_misses = 0
+        self._preheat_done: set[int] = set()
 
         self._lock = asyncio.Lock()
         self._heartbeat_task: asyncio.Task | None = None
@@ -112,7 +117,9 @@ class PrinterController:
             self.job_active = True
             self.resolved = False
             self.ams_mapping = data.get("ams_mapping")
-            self.engaged_at = None
+            if self.lease_id is None:
+                self.engaged_at = None
+            self._end_preheat()
             self.log.info(
                 "Print started: %s (ams_mapping=%s)",
                 data.get("subtask_name") or data.get("filename"),
@@ -170,6 +177,8 @@ class PrinterController:
                 if self.lease_id and self.engaged_at is not None and now - self.engaged_at > self.cfg.max_engaged_hours * 3600:
                     await self._off(f"heated for over {self.cfg.max_engaged_hours}h")
             else:
+                if await self._reconcile_preheat(status, now):
+                    return
                 if self.job_active:
                     self.log.info("Printer is %s; treating the print as ended", status.get("state"))
                     self.job_active = False
@@ -179,6 +188,72 @@ class PrinterController:
                         await self._off("printer no longer printing")
                 elif self.lease_id is None and self._off_task is None:
                     await self._off_if_stale_lease()
+
+    async def _reconcile_preheat(self, status: dict, now: float) -> bool:
+        """Heat while Bambuddy's queue preheat warms the bed ahead of uploading
+        a print. Bambuddy doesn't expose that stage directly, so it's inferred:
+        the printer is idle, its bed has a target, and a queue item for it is
+        pending. Returns True while a preheat is being handled."""
+        bed_target = (status.get("temperatures") or {}).get("bed_target") or 0
+        item = None
+        if bed_target > 0 and not self.job_active:
+            try:
+                item = await self._next_queue_item()
+            except Exception as e:
+                self.log.warning("Bambuddy queue unavailable: %s", e)
+                return self.preheat_item is not None
+        if item is None:
+            if self.preheat_item is None:
+                return False
+            # Two misses in a row: a single odd reading shouldn't stop the heater.
+            self._preheat_misses += 1
+            if self._preheat_misses < 2:
+                return True
+            self.log.info("Bambuddy preheat for queue item %s ended without a print starting", self.preheat_item)
+            self._end_preheat()
+            if self.lease_id:
+                await self._off("preheat abandoned")
+            return False
+
+        self._preheat_misses = 0
+        item_id = item.get("id")
+        if item_id in self._preheat_done:
+            return True
+        if self.preheat_item != item_id:
+            self.preheat_item = item_id
+            self.preheat_started = now
+            self.log.info(
+                "Bambuddy is preheating for queue item %s (%s, bed target %s°C)",
+                item_id,
+                item.get("archive_name") or item.get("library_file_name"),
+                bed_target,
+            )
+            res = await self.resolve_queue_item(item, status)
+            if res is None:
+                self.log.info("Filament for queue item %s not known; not heating", item_id)
+                self._preheat_done.add(item_id)
+                return True
+            self.log.info("Filament decision: %s", res.describe())
+            await self._apply_target(res.target_c)
+            if not self.lease_id:
+                self._preheat_done.add(item_id)
+            return True
+        if self.lease_id:
+            await self._check_still_ours()
+        if self.lease_id and self.preheat_started is not None and now - self.preheat_started > self.cfg.preheat_max_minutes * 60:
+            self._preheat_done.add(item_id)
+            await self._off(f"Bambuddy preheat ran over {self.cfg.preheat_max_minutes} min")
+        return True
+
+    async def _next_queue_item(self) -> dict | None:
+        items = await self.bambuddy.get_pending_queue(self.printer.printer_id)
+        items = [i for i in items if i.get("status") == "pending" and not i.get("manual_start")]
+        return min(items, key=lambda i: (i.get("position") or 0, i.get("id") or 0)) if items else None
+
+    def _end_preheat(self) -> None:
+        self.preheat_item = None
+        self.preheat_started = None
+        self._preheat_misses = 0
 
     async def _check_still_ours(self) -> None:
         """If someone turned the heater off or changed its mode on the device or
@@ -223,6 +298,18 @@ class PrinterController:
         if res is None and status.get("current_archive_id"):
             archive = await self.bambuddy.get_archive(status["current_archive_id"])
             res = resolve_from_types(split_slicer_types(archive.get("filament_type")), targets)
+        return res
+
+    async def resolve_queue_item(self, item: dict, status: dict) -> Resolution | None:
+        """Same precedence as Bambuddy's preheat: the item's own chamber target,
+        then the trays its ams_mapping names, then its slicer filament."""
+        override = item.get("preheat_chamber_target_override")
+        if override is not None:
+            return Resolution(int(override), "queue item override")
+        targets = parse_targets(await self.bambuddy.get_preheat_targets_raw(), self.cfg.overrides)
+        res = resolve_from_trays(status, item.get("ams_mapping"), targets)
+        if res is None:
+            res = resolve_from_types(split_slicer_types(item.get("filament_type")), targets, "queue item")
         return res
 
     async def _try_decide(self) -> None:
@@ -292,6 +379,9 @@ class PrinterController:
                 return
         maximum = (state.get("target") or {}).get("maximum_c") or 70
         target = clamp_for_device(wanted_c, MIN_TARGET_C, maximum)
+        if self.lease_id and target == self.target_c:
+            self.log.info("Already heating at %s°C", target)
+            return
         if target != wanted_c:
             self.log.info("Target %s°C adjusted to %s°C for the device's range", wanted_c, target)
         comms_ms = (state.get("config") or {}).get("comms_ms") or 300_000

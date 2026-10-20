@@ -48,6 +48,10 @@ class BambuddyClient:
     async def get_archive(self, archive_id: int) -> dict[str, Any]:
         return await self._get(f"/api/v1/archives/{archive_id}")
 
+    async def get_pending_queue(self, printer_id: int) -> list[dict[str, Any]]:
+        items = await self._get(f"/api/v1/queue/?printer_id={printer_id}&status=pending")
+        return items if isinstance(items, list) else []
+
     async def ws_token(self) -> str:
         r = await self._http.post("/api/v1/auth/ws-token")
         r.raise_for_status()

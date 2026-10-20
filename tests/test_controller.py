@@ -19,8 +19,10 @@ class FakeBambuddy:
             "vt_tray": [],
             "current_archive_id": None,
         }
+        self.status["temperatures"] = {"bed_target": 0}
         self.targets_raw = ""
         self.archives: dict[int, dict] = {}
+        self.queue: list[dict] = []
         self.fail = False
 
     async def get_status(self, printer_id):
@@ -31,6 +33,9 @@ class FakeBambuddy:
 
     async def get_preheat_targets_raw(self):
         return self.targets_raw
+
+    async def get_pending_queue(self, printer_id):
+        return [dict(i) for i in self.queue]
 
     async def get_archive(self, archive_id):
         return self.archives.get(archive_id, {})
@@ -315,3 +320,87 @@ async def test_shutdown_turns_off_our_heating():
     await c.handle_event(start([1]))
     await c.shutdown()
     assert h.commands()[-1] == ("off",)
+
+
+def queue_item(id=82, mapping=(-1, -1, 1), **kw):
+    return {"id": id, "status": "pending", "position": 1, "manual_start": False,
+            "ams_mapping": list(mapping), "filament_type": "ABS", "archive_name": "part", **kw}
+
+
+def preheating(b, item):
+    b.status["state"] = "FINISH"
+    b.status["temperatures"]["bed_target"] = 100
+    b.queue = [item]
+
+
+async def test_queue_preheat_engages_and_print_start_keeps_heating():
+    c, b, h = make()
+    preheating(b, queue_item())
+    await c.reconcile()
+    assert h.commands() == [("power_on", 45)]
+    await c.reconcile()
+    assert h.commands() == [("power_on", 45)]  # no re-issue while preheat continues
+    b.status["state"] = "PREPARE"
+    b.queue = []
+    await c.handle_event(start([-1, -1, 1]))
+    assert h.commands() == [("power_on", 45)]  # same target: lease kept
+    assert c.preheat_item is None
+    await c.handle_event(complete())
+    assert h.commands()[-1] == ("off",)
+
+
+async def test_queue_preheat_abandoned_turns_off_after_two_misses():
+    c, b, h = make()
+    preheating(b, queue_item())
+    await c.reconcile()
+    b.queue = []
+    b.status["temperatures"]["bed_target"] = 0
+    await c.reconcile()
+    assert ("off",) not in h.commands()
+    await c.reconcile()
+    assert h.commands() == [("power_on", 45), ("off",)]
+
+
+async def test_queue_preheat_pla_does_not_heat():
+    c, b, h = make()
+    preheating(b, queue_item(mapping=(0,), filament_type="PLA"))
+    await c.reconcile()
+    await c.reconcile()
+    assert h.commands() == []
+
+
+async def test_queue_preheat_uses_item_override_and_slicer_fallback():
+    c, b, h = make()
+    preheating(b, queue_item(preheat_chamber_target_override=55))
+    await c.reconcile()
+    assert h.commands() == [("power_on", 55)]
+
+    c, b, h = make()
+    preheating(b, queue_item(mapping=(-1,), filament_type="ASA"))
+    await c.reconcile()
+    assert h.commands() == [("power_on", 45)]
+
+
+async def test_no_preheat_without_bed_target_or_for_manual_items():
+    c, b, h = make()
+    preheating(b, queue_item())
+    b.status["temperatures"]["bed_target"] = 0
+    await c.reconcile()
+    b.status["temperatures"]["bed_target"] = 100
+    b.queue = [queue_item(manual_start=True)]
+    await c.reconcile()
+    assert h.commands() == []
+
+
+async def test_queue_preheat_time_cap():
+    now = [0.0]
+    c, b, h = make(preheat_max_minutes=10)
+    c.clock = lambda: now[0]
+    preheating(b, queue_item())
+    await c.reconcile()
+    now[0] = 601
+    await c.reconcile()
+    assert h.commands() == [("power_on", 45), ("off",)]
+    now[0] = 700
+    await c.reconcile()
+    assert h.commands() == [("power_on", 45), ("off",)]  # not re-engaged for the same item
