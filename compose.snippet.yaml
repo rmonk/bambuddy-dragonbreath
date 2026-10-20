@@ -1,0 +1,29 @@
+# Add this service to the compose file that runs Bambuddy. Everything is set
+# through environment variables (put the secrets in the stack's .env); a
+# mounted /config/config.yaml is only needed for multiple printers.
+services:
+  bambuddy-dragonbreath:
+    image: ghcr.io/rmonk/bambuddy-dragonbreath:latest
+    container_name: bambuddy-dragonbreath
+    restart: unless-stopped
+    # Allow time for the "off" command on shutdown.
+    stop_grace_period: 20s
+    environment:
+      BAMBUDDY_URL: ${BAMBUDDY_URL:-http://bambuddy:8000}
+      BAMBUDDY_API_KEY: ${DRAGONBREATH_BAMBUDDY_API_KEY:-}
+      PRINTER_ID: "1"
+      PRINTER_NAME: "X1C"
+      DRAGONBREATH_URL: ${DRAGONBREATH_URL}
+      DRAGONBREATH_TOKEN: ${DRAGONBREATH_TOKEN:-}
+      # OVERRIDES: "ABS=55,PETG=0"
+      # OFF_DELAY_S: "0"
+      # DRY_RUN: "true"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          memory: 128M

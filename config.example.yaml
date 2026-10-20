@@ -1,0 +1,31 @@
+bambuddy:
+  # From inside the Bambuddy compose network; use http://<host>:8000 otherwise.
+  url: http://bambuddy:8000
+  # API key with only "Read status" enabled. Leave empty if Bambuddy auth is off.
+  api_key: ${BAMBUDDY_API_KEY:-}
+
+printers:
+  - printer_id: 1          # Bambuddy's printer id
+    name: X1C
+    dragonbreath_url: http://192.168.1.50
+    # The device's control token (POST /api/v2/token); any value if none is set.
+    dragonbreath_token: ${DRAGONBREATH_TOKEN:-bambuddy}
+
+# Filament → °C entries that win over Bambuddy's Preheat table.
+# Matching is by base material: "ASA" also covers ASA-GF, ASA Aero, etc.
+overrides: {}
+#  ABS: 50
+#  PETG: 0
+
+# Keep heating this many seconds after a print ends (0 = off immediately).
+off_delay_s: 0
+
+# Clear a latched DragonBreath fault automatically before heating.
+auto_clear_fault: false
+
+# Safety limits.
+bambuddy_lost_off_s: 600
+max_engaged_hours: 24
+
+reconcile_interval_s: 30
+log_level: INFO
