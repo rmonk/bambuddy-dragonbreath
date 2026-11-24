@@ -142,6 +142,9 @@ Every decision is logged, for example:
 Pushing a `v*` tag builds and publishes `ghcr.io/rmonk/bambuddy-dragonbreath`
 (`latest`, `X.Y.Z`, `X.Y`) for amd64 and arm64.
 
+Versions follow SemVer. Releases that only refresh dependencies or the base
+image, with no code change, bump the patch version.
+
 ## License
 
 AGPL-3.0-or-later. The filament matching in `filament.py` is ported from
@@ -156,4 +159,5 @@ PATH="$PWD/.venv/bin:$PATH" safe-chain pip install -e '.[dev]'
 ```
 
 The Docker image installs from `requirements.lock`, which pins exact versions
-by hash. Regenerate it with `scripts/lock.sh`.
+by hash. Regenerate it with `scripts/lock.sh`, or `scripts/lock.sh --upgrade`
+to move to the latest releases first.
